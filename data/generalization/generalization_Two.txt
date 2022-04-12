@@ -1,0 +1,2 @@
+D:/Ftp_Server/zgx/data/Acoustic-NewData/generalization_two_data/Two_1.h5
+D:/Ftp_Server/zgx/data/Acoustic-NewData/generalization_two_data/TwoReal_1.mat
