@@ -150,15 +150,31 @@ def test(test_dataloader, model):
     Power_bias_list = list()
     time_list = list()
 
+
+    # 预热
+    cnt=1
+    with torch.no_grad():
+         for idx, (DAS_result, gt) in enumerate(test_dataloader):
+            DAS_result = DAS_result.cuda(non_blocking=True)
+
+            if cnt==100:
+                break
+            output = model(DAS_result)
+            cnt+=1
+
+
     with torch.no_grad():
         for idx, (DAS_result, gt) in enumerate(test_dataloader):
+            DAS_result = DAS_result.cuda(non_blocking=True)
+            
+            torch.cuda.synchronize()
             start_time = time.time()
 
-            DAS_result = DAS_result.cuda(non_blocking=True)
             output = model(DAS_result)
 
-            
+            torch.cuda.synchronize()
             end_time = time.time()
+            
             now_time = end_time - start_time
             np_output = output.cpu().numpy()
             np_output = np.squeeze(np_output, 0)

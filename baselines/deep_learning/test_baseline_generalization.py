@@ -13,18 +13,22 @@ if __name__ == '__main__':
     parser.add_argument('--test_dir', 
                         help='The directory used to evaluate the models',
                         default='../../data/generalization/generalization_One.txt', type=str)
+                        # default='../../data/One_test.txt', type=str)
     parser.add_argument('--label_dir', 
                         help='The directory used to train the models',
-                        default='D:/Ftp_Server/zgx/data/Acoustic-NewData/generalization_one_data/One.txt', type=str)
+                        # default='D:/Ftp_Server/zgx/data/Acoustic-NewData/generalization_one_data/One.txt', type=str)
+                        default='', type=str)
     parser.add_argument('--DAS_results_dir', 
                         help='The directory which is saving DAS result',
-                        default='./generalization_data_DAS_results/One/', type=str)
+                        default='', type=str)
+                        # default='./DAS_results/One/', type=str)
     parser.add_argument('--horizonal_distance', default=2.5, type=float, help='horizonal distance between microphone array and sound source')
     parser.add_argument('--micro_array_path', default='D:/Ftp_Server/zgx/codes/Fast_DAS_2/MicArray/56_spiral_array.mat', type=str, help='micro array path')
     parser.add_argument('--scanning_area', default=[-2, 2], type=list, help='the size of imaging area')
     parser.add_argument('--scanning_resolution', default=0.1, type=float, help='the resolution of imaging area')
     parser.add_argument('--ckpt', default='', type=str, help='test model path')
     parser.add_argument('--mode', default=None, choices=['resnet20', 'AlxNet'], help='resnet20 or AlxNet')
+    
 
     args = parser.parse_args()
   

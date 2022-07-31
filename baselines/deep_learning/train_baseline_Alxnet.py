@@ -155,28 +155,50 @@ def test(test_dataloader, model, args):
     scanning_area_X = np.arange(args.scanning_area[0], args.scanning_area[1] + args.scanning_resolution, args.scanning_resolution)
     scanning_area_Y = scanning_area_X
 
+    # 预热
+    cnt=1
+    with torch.no_grad():
+         for idx, (DAS_result, gt) in enumerate(test_dataloader):
+            DAS_result = DAS_result.cuda(non_blocking=True)
 
+            if cnt==100:
+                break
+            _ = model(DAS_result)
+            cnt+=1
+            
     with torch.no_grad():
         for idx, (DAS_result, gt) in enumerate(test_dataloader):
+            DAS_result = DAS_result.cuda(non_blocking=True)
+            
+            torch.cuda.synchronize()
             start_time = time.time()
 
-            DAS_result = DAS_result.cuda(non_blocking=True)
             output = model(DAS_result)
             
+            torch.cuda.synchronize()
             end_time = time.time()
             now_time = end_time - start_time
 
             np_gt = gt.cpu().numpy()
-            gt_x_pos = math.ceil((np_gt[0] + 1) / len(scanning_area_X))
-            gt_y_pos = np.mod((np_gt[0] + 1), len(scanning_area_Y))
+            # gt_x_pos = math.ceil((np_gt[0] + 1) / len(scanning_area_X))
+            # gt_y_pos = np.mod((np_gt[0] + 1), len(scanning_area_Y))
+            # gt_x = scanning_area_X[gt_x_pos - 1]
+            # gt_y = scanning_area_Y[gt_y_pos - 1]
+            gt_y_pos = math.ceil((np_gt[0] + 1) / len(scanning_area_X))
+            gt_x_pos = (np_gt[0] + 1) - (gt_y_pos - 1) * len(scanning_area_X)
             gt_x = scanning_area_X[gt_x_pos - 1]
             gt_y = scanning_area_Y[gt_y_pos - 1]
 
             np_output = output.cpu().numpy()
             np_output = np.squeeze(np_output, 0)
             np_output = np.where(np_output == max(np_output))
-            output_x_pos =  math.ceil((np_output[0][0] + 1) / len(scanning_area_X))
-            output_y_pos =  np.mod((np_output[0][0] + 1), len(scanning_area_Y))
+            # output_x_pos =  math.ceil((np_output[0][0] + 1) / len(scanning_area_X))
+            # output_y_pos =  np.mod((np_output[0][0] + 1), len(scanning_area_Y))
+            # output_x = scanning_area_X[output_x_pos - 1]
+            # output_y = scanning_area_Y[output_y_pos - 1]
+
+            output_y_pos = math.ceil((np_output[0][0] + 1) / len(scanning_area_X))
+            output_x_pos = (np_output[0][0]  + 1) - (output_y_pos - 1) * len(scanning_area_X)
             output_x = scanning_area_X[output_x_pos - 1]
             output_y = scanning_area_Y[output_y_pos - 1]
 

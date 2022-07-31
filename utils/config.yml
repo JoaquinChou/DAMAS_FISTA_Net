@@ -1,0 +1,11 @@
+base:
+ c: 343
+ fs: 51200
+ N_total_samples: 1024
+ scan_low_freq: 2000
+ scan_high_freq: 2000
+ scan_resolution: 0.1
+ scan_x: [-2, 2]
+ scan_y: [-2, 2]
+ z_dist: 2.5
+

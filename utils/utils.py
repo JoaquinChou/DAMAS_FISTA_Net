@@ -1,22 +1,29 @@
 import h5py
+import scipy.io as scio
 import sys
 import numpy as np
 import math
 import torch
-import scipy.io as scio
 import matplotlib.pyplot as plt
 from scipy.fftpack import fft
+from utils.config import Config
+# from config import Config
+import os
 
-
-def get_search_freq(N_total_samples, search_freq, Fs):
+def get_search_freq(N_total_samples, search_freq_left, search_freq_right, Fs):
     t_start = 0
+  
     t_end = N_total_samples / Fs
     # 开始和结束时间点
     start_sample = math.floor(t_start * Fs)
     end_sample = math.ceil(t_end * Fs)
     # 选取在扫描频率之间的点
     x_fr = Fs / end_sample * np.arange(0, math.floor(end_sample / 2))  
-    _, freq_sels = ismember(search_freq, x_fr)
+
+    # _, freq_sels = ismember(search_freq, x_fr)
+    freq_sels = list(np.where(np.logical_and(x_fr>=search_freq_left, x_fr<=search_freq_right)))[0]
+
+
     freq_sels = freq_sels.reshape((freq_sels.shape[0], 1))
     # 扫描频点的个数
     N_freqs = len(freq_sels)
@@ -26,14 +33,14 @@ def get_search_freq(N_total_samples, search_freq, Fs):
     return start_sample, end_sample, freq_sels, N_freqs, frequencies
 
 
-def developCSM(mic_signal, search_freq, Fs):
-
+def developCSM(mic_signal, search_freq_left, search_freq_right, Fs):
+    
     # 定义采样点数和开始结束时间
     N_total_samples = mic_signal.shape[0]
     # 麦克风阵列数
     N_mic = mic_signal.shape[1]
 
-    start_sample, end_sample,freq_sels, N_freqs, _ = get_search_freq(N_total_samples, search_freq, Fs)
+    start_sample, end_sample,freq_sels, N_freqs, _ = get_search_freq(N_total_samples, search_freq_left, search_freq_right, Fs)
 
     # 初始化互谱矩阵 CSM
     CSM = np.zeros((N_mic, N_mic, N_freqs), dtype=complex)  # npU
@@ -55,6 +62,7 @@ def steerVector2(plane_distance, frequencies, scan_limits, grid_resolution, mic_
     # 麦克风个数和扫描频点个数
     N_mic = mic_positions.shape[1]
     N_freqs = frequencies.size
+
 
     # 定义扫描平面
     x = np.arange(scan_limits[0], scan_limits[1] + grid_resolution, grid_resolution)
@@ -101,6 +109,8 @@ def Fast_DAS(g, w, frequencies):
     # 参数初始化
     N_freqs = frequencies.size
     N_mic = w.shape[2]
+    wk_reshape = np.zeros((N_mic, int(w[:,:,:,0].size / N_mic), N_freqs), dtype=complex)
+    A = np.zeros((int(w[:,:,:,0].size / N_mic), int(w[:,:,:,0].size / N_mic), N_freqs))
 
     # 计算波束形成的声功率图
     for K in range (N_freqs):
@@ -108,13 +118,13 @@ def Fast_DAS(g, w, frequencies):
         wk = w[:, :, :, K]
         gk = g[:, :, :, K]
         if int(wk.size / N_mic) != wk.size / N_mic:
-            print("Input Type can't be reshaped!")
+            print("Input type can't be reshaped!")
             break
         w_reshape = wk.reshape(int(wk.size / N_mic), N_mic, order='F')
-        wk_reshape = w_reshape.T
+        wk_reshape[:, :, K]= w_reshape.T
 
         g_reshape = gk.reshape(int(wk.size / N_mic), N_mic, order='F')
-        A = (np.abs(np.dot(w_reshape.conj(), g_reshape.T)) ** 2) / (N_mic ** 2)        
+        A[:, :, K] = (np.abs(np.dot(w_reshape.conj(), g_reshape.T)) ** 2) / (N_mic ** 2)        
   
     return A, wk_reshape, N_mic
 
@@ -131,9 +141,13 @@ def get_DAS_result(wk_reshape, CSM, frequencies, N_mic, scan_limits, scan_resolu
     # 变量初始化
     B = np.zeros((1, N_X * N_Y))
     N_freqs = frequencies.size
+    print("wk_reshape->", wk_reshape.shape)
+    print("CSM->", CSM.shape)
+    print("N_freqs->", N_freqs)
     for K in range (N_freqs):
          # 频率 K 下的波束成像图
-        B_freqK = np.sum(wk_reshape.conj() * (np.dot(CSM[:, :, K], wk_reshape)), axis=0) / (N_mic ** 2)
+
+        B_freqK = np.sum(wk_reshape[:, :, K].conj() * (np.dot(CSM[:, :, K], wk_reshape[:, :, K])), axis=0) / (N_mic ** 2)
         # 累加各个频率成分
         B = B + B_freqK
         
@@ -210,14 +224,16 @@ def save_model(model, optimizer, opt, epoch, save_file):
 
 def get_microphone_info(micro_array_path):
     mic_array = h5py.File(micro_array_path, 'r')['array']
-    mic_array = np.array(mic_array)
+    # mic_array = scio.loadmat(micro_array_path)['array']
+    print(mic_array.shape)
+    print(mic_array)
 
     mic_x_axis = mic_array[0]
     mic_x_axis = mic_x_axis.reshape(mic_x_axis.shape[0], 1)
     
     mic_y_axis = mic_array[1]
     mic_y_axis = mic_y_axis.reshape(mic_y_axis.shape[0], 1)                   
-    mic_z_axis = np.zeros((56, 1))
+    mic_z_axis = np.zeros((mic_array.shape[1], 1))
     mic_pos = np.concatenate((mic_x_axis, mic_y_axis, mic_z_axis), axis=1)
     # 阵列中心的坐标
     mic_centre = mic_pos.mean(axis=0)
@@ -239,43 +255,78 @@ def get_magnitude(test_raw_sound_data, simulation_single_sound_source_data):
     return magnitude
 
 
-def data_preprocess(raw_sound_data):
-
+def data_preprocess(raw_sound_data, yml_path):
+    con = Config(yml_path).getConfig()['base']
     # 采样频率
-    fs = 51200
-    # 扫描频率范围
-    scan_freq = [2000]
+    fs = con['fs']
 
-    CSM = developCSM(raw_sound_data, scan_freq, fs)
+    # 扫描频率范围
+    scan_low_freq = con['scan_low_freq']
+    scan_high_freq = con['scan_high_freq']
+
+    CSM = developCSM(raw_sound_data, scan_low_freq, scan_high_freq, fs)
 
     return CSM
 
 
-def generate_A_and_wk_reshape(micro_array_path, save_A_and_wk_reshape_path, N_total_samples):
-    c = 343
+def generate_A_and_wk_reshape_and_ATA_and_ATA_Eigenvalues(micro_array_path, save_A_and_wk_reshape_path, yml_path):
+    con = Config(yml_path).getConfig()['base']
+    c = con['c']
     # 采样频率
-    fs = 51200
+    fs = con['fs']
     # 麦克风和声源之间的距离
-    z_dist = 3.0
+    z_dist = con['z_dist']
     # 扫描频点
     # 扫描区域限定范围和扫描网格分辨率
-    scan_x = [-2, 2]
-    scan_y = [-2, 2]
-    scan_resolution = 0.1
+    scan_x = con['scan_x']
+    scan_y = con['scan_y']
+    scan_resolution = con['scan_resolution'] 
+    N_total_samples = con['N_total_samples']
+
     # 扫描频率范围
-    scan_freq = [2000]
+    scan_low_freq = con['scan_low_freq']
+    scan_high_freq = con['scan_high_freq']
 
     mic_pos, mic_centre = get_microphone_info(micro_array_path)
-    _, _, _, _, frequencies = get_search_freq(N_total_samples, scan_freq, fs)
+    _, _, _, _, frequencies = get_search_freq(N_total_samples, scan_low_freq, scan_high_freq, fs)
     g, w = steerVector2(z_dist, frequencies, scan_x + scan_y, scan_resolution, mic_pos.T, c, mic_centre)
     A, wk_reshape, _ =  Fast_DAS(g, w, frequencies)
+    ATA = np.zeros((A.shape[0], A.shape[0], frequencies.size))
+    for k in range(frequencies.size):
+        ATA_k = np.dot(np.transpose(A[:,:,k], (1,0)), A[:,:,k])
+        ATA[:,:,k] = ATA_k
+
+    L = countEigenvalues(A)
+    print("A.shape", A.shape)
+    print("wk_reshape.shape", wk_reshape.shape)
 
     print("Saving the A in " + save_A_and_wk_reshape_path)
-    np.savetxt(save_A_and_wk_reshape_path + 'A.csv', A, delimiter = ',')
+    np.save(save_A_and_wk_reshape_path + 'A.npy', A)
     
     print("Saving the wk_reshape in " + save_A_and_wk_reshape_path)
-    np.savetxt(save_A_and_wk_reshape_path + 'wk_reshape.csv', wk_reshape, delimiter = ',')
+    np.save(save_A_and_wk_reshape_path + 'wk_reshape.npy', wk_reshape)
  
+    print("Saving the ATA in " + save_A_and_wk_reshape_path)
+    np.save(save_A_and_wk_reshape_path + 'ATA.npy', ATA)
+
+    print("Saving the ATA_eigenvalues in " + save_A_and_wk_reshape_path)
+    np.save(save_A_and_wk_reshape_path + 'ATA_eigenvalues.npy', L)
+ 
+
+def countEigenvalues(A):
+
+    freq_num = A.shape[2]
+    L = list()
+    for K in range(freq_num):
+        A_K = A[:, :, K]
+        ATA_K = np.matmul(A_K, A_K.T)
+        eigenvalue, _ = np.linalg.eig(ATA_K)
+        max_eigenvalue = np.max(np.real(eigenvalue))
+        print(max_eigenvalue)
+        L.append(max_eigenvalue)
+
+    return L
+
 
 
 #log the terminal message in the txt
@@ -292,10 +343,77 @@ class Logger(object):
         pass
 
 
+def wgn(x, snr):
+    snr = 10**(snr / 10.0)
+    index = np.random.randint(x.shape[1])
+    xpower = np.sum(x**2, axis=1)[index] / x.shape[0]
+    npower = xpower / snr
+    noise_x = np.random.randn(x.shape[0], x.shape[1])
+
+    return noise_x * np.sqrt(npower)
+
+
+def neighbor_2_zero(matrix, source_x, source_y, n=2):
+    # print("source_x->", source_x, "  source_y->", source_y)
+
+
+    if source_x-n < 0:
+        source_x += n
+
+    if source_y-n < 0:
+        source_y += n
+
+    if source_x+n >= matrix.shape[0]:
+        source_x -= n
+
+    if source_y+n >= matrix.shape[1]:
+        source_y -= n
+
+    for i in range(source_x-n, source_x+n+1):
+        for j in range(source_y-n, source_y+n+1):
+            # print("i->", i, " j->", j, " matrix[i][j]->", matrix[i][j])
+            matrix[i][j] = 0
+
+    return matrix
+
+
+def label_2_rename(rename_path):
+    for file in os.listdir(rename_path):
+        os.rename(rename_path + file, rename_path + file.split('.mat')[0] + '_2000.mat')
+        print('Finishing rename ' + rename_path + file.split('.mat')[0] + '_2000.mat')
+
+
+def find_match_source(output_mat_row, gt_mat):
+    min_index = -1
+    location_bias = float("inf")
+    for i in range(gt_mat.shape[0]):
+        if location_bias > np.sqrt(((output_mat_row[0] - gt_mat[i][0])**2 + (output_mat_row[1] - gt_mat[i][1])**2)):
+            location_bias = np.sqrt(((output_mat_row[0] - gt_mat[i][0])**2 + (output_mat_row[1] - gt_mat[i][1])**2))
+            Power_bias = np.abs(output_mat_row[2] - gt_mat[i][2])
+            min_index = i
+  
+    gt_mat = np.delete(gt_mat, min_index, 0)
+    return min_index, location_bias, Power_bias, gt_mat
+
+
 if __name__ == '__main__':
-    test_raw_data = np.random.random(size=(1024, 56))
-    simulation_single_sound_source_data = np.random.random(size=(1024, 56))
-    get_magnitude(test_raw_data, simulation_single_sound_source_data)
+    # a = np.arange(25).reshape(5,5)
+    # print(a)
+    # neighbor_2_zero(a, 2, 2)
+    # print(a)
+    # rename_path = 'D:/Ftp_Server/zgx/data/two_point_DAMAS_FISTA_Net/two_point_data_label/'
+    # label_2_rename(rename_path)
+
+    output_mat_row = np.array([0.9,1.2])
+    print("output_mat_row->", output_mat_row.shape)
+    gt_mat = np.array([ [1.776, -1.5], [0.9,1.2]])
+    print("gt_mat->", gt_mat.shape)
+
+    min_index, min_num, gt_mat = find_match_source(output_mat_row, gt_mat)
+
+    print(min_index)
+    print(min_num)
+    print("gt_mat->", gt_mat)
 
 
 

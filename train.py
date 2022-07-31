@@ -2,7 +2,6 @@ import argparse
 import sys
 import torch
 import torch.backends.cudnn as cudnn
-import pandas
 import numpy as np
 import os
 import time
@@ -10,6 +9,9 @@ import math
 from datasets.dataset import SoundDataset
 from utils.utils import AverageMeter, save_model, Logger
 from networks.damas_fista_net import DAMAS_FISTANet
+import heapq
+from utils.config import Config
+from utils.utils import get_search_freq, neighbor_2_zero
 
 def parse_option():
     parser = argparse.ArgumentParser(description='DAMAS_FISTANet for sound source in pytorch')
@@ -54,11 +56,15 @@ def parse_option():
                         default=5, 
                         type=int,
                         help='iteration nums')
-    parser.add_argument('--scanning_area', default=[-2, 2], type=list, help='the size of imaging area')
-    parser.add_argument('--scanning_resolution', default=0.1, type=float, help='the resolution of imaging area')
-    parser.add_argument('--horizonal_distance', default=2.5, type=float, help='horizonal distance between microphone array and sound source')
     parser.add_argument('--micro_array_path', default='./data/56_spiral_array.mat', type=str, help='micro array path')
-  
+    parser.add_argument('--wk_reshape_path', default='./data/wk_reshape.npy', type=str, help='wk_reshape path')
+    parser.add_argument('--A_path', default='./data/A.npy', type=str, help='A path')
+    parser.add_argument('--ATA_path', default='./data/ATA.npy', type=str, help='ATA path')
+    parser.add_argument('--L_path', default='./data/ATA_eigenvalues.npy', type=str, help='L path')
+    parser.add_argument('--more_source', action='store_true', help='whether use more source')
+    parser.add_argument('--config', default='./utils/config.yml', type=str, help='config file path')
+    parser.add_argument('--source_num', default=1, type=int, help='source_num')
+
 
 
     args = parser.parse_args()
@@ -67,14 +73,14 @@ def parse_option():
     return record_time, args
 
 
-def set_loader(args):
+def set_loader(args, config):
     train_dataloader = torch.utils.data.DataLoader(
-        SoundDataset(args.train_dir, args.label_dir, args.horizonal_distance, args.micro_array_path),
+        SoundDataset(args.train_dir, args.label_dir, config['z_dist'], args.micro_array_path, args.wk_reshape_path, args.A_path, args.ATA_path, args.L_path, args.frequencies, args.config, more_source=args.more_source, train=True),
         batch_size=args.batch_size, shuffle=True,
         num_workers=0, pin_memory=True)
 
     test_dataloader = torch.utils.data.DataLoader(
-        SoundDataset(args.test_dir, args.label_dir, args.horizonal_distance, args.micro_array_path),
+        SoundDataset(args.test_dir, args.label_dir, config['z_dist'], args.micro_array_path, args.wk_reshape_path, args.A_path, args.ATA_path, args.L_path, args.frequencies, args.config, more_source=args.more_source),
         batch_size=1, shuffle=True,
         num_workers=0, pin_memory=True)
 
@@ -82,9 +88,9 @@ def set_loader(args):
 
 
 
-def set_model(args, wk_reshape, A):
+def set_model(args):
     # 加载模型
-    model = DAMAS_FISTANet(args.LayNo, wk_reshape, A)
+    model = DAMAS_FISTANet(args.LayNo)
     model.cuda()
     cudnn.benchmark = True
 
@@ -114,15 +120,20 @@ def train(train_dataloader, model, optimizer, epoch, args):
 
     losses = AverageMeter()
 
-    for idx, (CSM, label, _) in enumerate(train_dataloader):
+    for idx, (CSM_K, wk_reshape_K, A_K, ATA_K, L_K, _, label, _) in enumerate(train_dataloader):
         if torch.cuda.is_available():
-            CSM = CSM.cuda(non_blocking=True)
+            CSM_K = CSM_K.cuda(non_blocking=True)
+            wk_reshape_K = wk_reshape_K.cuda(non_blocking=True)
+            A_K = A_K.cuda(non_blocking=True)
+            ATA_K = ATA_K.cuda(non_blocking=True)
+            L_K = torch.Tensor(L_K).cuda(non_blocking=True)
             label = label.cuda(non_blocking=True)
+
 
         bsz = label.shape[0]
 
         # compute_loss
-        output = model(CSM)
+        output = model(CSM_K, wk_reshape_K, A_K, ATA_K, L_K)
 
         loss = torch.sum((output - label) ** 2)
         
@@ -150,64 +161,191 @@ def train(train_dataloader, model, optimizer, epoch, args):
 
 
 
-def test(test_dataloader, model, args):
+# def test(test_dataloader, model, args, config):
+#     """test"""
+
+#     model.eval()
+#     location_bias_list = list()
+#     Power_bias_list = list()
+#     time_list = list()
+#     scanning_area_X = np.arange(config['scan_x'][0], config['scan_x'][1] + config['scan_resolution'], config['scan_resolution'])
+#     scanning_area_Y = np.arange(config['scan_y'][0], config['scan_y'][1] + config['scan_resolution'], config['scan_resolution'])
+
+#     with torch.no_grad():
+#         for idx, (CSM, wk_reshape, A, ATA, L, label, _) in enumerate(test_dataloader):
+
+#             CSM = CSM.cuda(non_blocking=True)
+#             wk_reshape = wk_reshape.cuda(non_blocking=True)
+#             A = A.cuda(non_blocking=True)
+#             ATA = ATA.cuda(non_blocking=True)
+#             L = L.cuda(non_blocking=True)
+
+#             # forward
+#             output = None
+#             torch.cuda.synchronize()
+#             start_time = time.time()
+
+#             for K in range(len(args.frequencies)):
+#                 CSM_K = CSM[:, :, :, K]
+#                 wk_reshape_K = wk_reshape[:, :, :, K]
+#                 A_K = A[:, :, :, K]
+#                 ATA_K = ATA[:, :, :, K]
+#                 L_K = L[:, K]
+#                 L_K = torch.unsqueeze(L_K, 1).to(torch.float64)
+#                 L_K = torch.unsqueeze(L_K, 2).to(torch.float64)
+#                 # forward
+#                 if output is None:
+#                     output = model(CSM_K, wk_reshape_K, A_K, ATA_K, L_K)
+#                 else:
+#                     output += model(CSM_K, wk_reshape_K, A_K, ATA_K, L_K)
+
+
+#             torch.cuda.synchronize()
+#             end_time = time.time()
+
+#             np_gt = label.cpu().numpy()
+#             np_gt = np.squeeze(np_gt, 0)
+#             max_gt = max(np_gt)[0]
+#             np_gt = np.where(np_gt == max(np_gt))
+#             gt_x_pos = math.ceil((np_gt[0][0] + 1) / len(scanning_area_X))
+#             gt_y_pos = np.mod((np_gt[0][0] + 1), len(scanning_area_Y))
+#             gt_x = scanning_area_X[gt_x_pos - 1]
+#             gt_y = scanning_area_Y[gt_y_pos - 1]
+
+#             np_output = output.cpu().numpy()
+#             np_output = np.squeeze(np_output, 0)
+#             max_output = max(np_output)[0]
+#             np_output = np.where(np_output == max(np_output))
+#             output_x_pos = math.ceil((np_output[0][0] + 1) / len(scanning_area_X))
+#             output_y_pos = np.mod((np_output[0][0] + 1), len(scanning_area_Y))
+#             output_x = scanning_area_X[output_x_pos - 1]
+#             output_y = scanning_area_Y[output_y_pos - 1]
+
+
+#             Power_output = max_output
+#             Power_label = max_gt 
+#             Power_bias = np.abs(Power_output - Power_label)
+           
+#             now_time = end_time - start_time
+#             location_bias = np.sqrt(((output_x - gt_x)**2 + (output_y - gt_y)**2))
+#             location_bias_list.append(location_bias)
+#             Power_bias_list.append(Power_bias)
+#             time_list.append(now_time)
+           
+
+#             print(str(idx + 1) + "___label_x={}\t label_y={}\t Power_label={}".format(
+#                                                         gt_x, gt_y, Power_label))
+
+#             print(str(idx + 1) + "___output_x={}\t output_y={}\t Power_output={}\t time={}".format(
+#                                                         output_x, output_y, Power_output, now_time))
+
+#             print(str(idx + 1) + "___location_bias={}\t Power_bias={}".format(
+#                                                         location_bias, Power_bias))
+        
+#         print("mean_location_bias_in_val={}\t mean_Power_bias_in_val={}\t time_for_mean={}".format(np.mean(location_bias_list), np.mean(Power_bias_list), np.mean(time_list)))
+
+
+def test_more_source(test_dataloader, model, args, config):
     """test"""
 
     model.eval()
     location_bias_list = list()
     Power_bias_list = list()
     time_list = list()
-    scanning_area_X = np.arange(args.scanning_area[0], args.scanning_area[1] + args.scanning_resolution, args.scanning_resolution)
-    scanning_area_Y = scanning_area_X
+    scanning_area_X = np.arange(config['scan_x'][0], config['scan_x'][1] + config['scan_resolution'], config['scan_resolution'])
+    scanning_area_Y = np.arange(config['scan_y'][0], config['scan_y'][1] + config['scan_resolution'], config['scan_resolution'])
 
     with torch.no_grad():
-        for idx, (CSM, label, _) in enumerate(test_dataloader):
-
+        for idx, (CSM, wk_reshape, A, ATA, L, label, _) in enumerate(test_dataloader):
+    
             CSM = CSM.cuda(non_blocking=True)
-            start_time = time.time()
-            # forward
-            output = model(CSM)
+            wk_reshape = wk_reshape.cuda(non_blocking=True)
+            A = A.cuda(non_blocking=True)
+            ATA = ATA.cuda(non_blocking=True)
+            L = L.cuda(non_blocking=True)
 
+            # forward
+            output = None
+            torch.cuda.synchronize()
+            start_time = time.time()
+            for K in range(len(args.frequencies)):
+                CSM_K = CSM[:, :, :, K]
+                wk_reshape_K = wk_reshape[:, :, :, K]
+                A_K = A[:, :, :, K]
+                ATA_K = ATA[:, :, :, K]
+                L_K = L[:, K]
+                L_K = torch.unsqueeze(L_K, 1).to(torch.float64)
+                L_K = torch.unsqueeze(L_K, 2).to(torch.float64)
+                # forward
+                if output is None:
+                    output = model(CSM_K, wk_reshape_K, A_K, ATA_K, L_K)
+                else:
+                    output += model(CSM_K, wk_reshape_K, A_K, ATA_K, L_K)
+
+            torch.cuda.synchronize()
             end_time = time.time()
+            now_time = end_time - start_time
+            time_list.append(now_time)
+
+
 
             np_gt = label.cpu().numpy()
-            np_gt = np.squeeze(np_gt, 0)
-            max_gt = max(np_gt)[0]
-            np_gt = np.where(np_gt == max(np_gt))
-            gt_x_pos = math.ceil((np_gt[0][0] + 1) / len(scanning_area_X))
-            gt_y_pos = np.mod((np_gt[0][0] + 1), len(scanning_area_Y))
-            gt_x = scanning_area_X[gt_x_pos - 1]
-            gt_y = scanning_area_Y[gt_y_pos - 1]
+            np_output = output.cpu().numpy()    
+            np_gt = np.squeeze(np.squeeze(np_gt, 0), 1)
+            np_output = np.squeeze(np.squeeze(np_output, 0), 1)
 
-            np_output = output.cpu().numpy()
-            np_output = np.squeeze(np_output, 0)
-            max_output = max(np_output)[0]
-            np_output = np.where(np_output == max(np_output))
-            output_x_pos = math.ceil((np_output[0][0] + 1) / len(scanning_area_X))
-            output_y_pos = np.mod((np_output[0][0] + 1), len(scanning_area_Y))
-            output_x = scanning_area_X[output_x_pos - 1]
-            output_y = scanning_area_Y[output_y_pos - 1]
+            print("source num is->", args.source_num)
+
+            for i in range(args.source_num):
+                max_gt = max(np_gt)
+                print("max_gt->", max_gt)
+                np_gt_index = np.where(np_gt == max_gt)[0][0]
+                print("np_gt_index->", np_gt_index)
+
+                gt_y_pos = math.ceil((np_gt_index + 1) / len(scanning_area_X))
+                gt_x_pos = (np_gt_index + 1) - (gt_y_pos - 1) * len(scanning_area_X)
+                gt_x = scanning_area_X[gt_x_pos - 1]
+                gt_y = scanning_area_Y[gt_y_pos - 1]
+
+                max_output = max(np_output)
+                print("max_output->", max_output)
+                np_output_index = np.where(np_output == max_output)[0][0]
+                print("np_output_index->", np_output_index)
+                
+                output_y_pos = math.ceil((np_output_index + 1) / len(scanning_area_X))
+                output_x_pos = (np_output_index + 1) - (output_y_pos - 1) * len(scanning_area_X)
+                output_x = scanning_area_X[output_x_pos - 1]
+                output_y = scanning_area_Y[output_y_pos - 1]
 
 
-            Power_output = max_output
-            Power_label = max_gt 
-            Power_bias = np.abs(Power_output - Power_label)
-           
-            now_time = end_time - start_time
-            location_bias = np.sqrt(((output_x - gt_x)**2 + (output_y - gt_y)**2))
-            location_bias_list.append(location_bias)
-            Power_bias_list.append(Power_bias)
-            time_list.append(now_time)
-           
+                Power_output = max_output
+                Power_label = max_gt
+                Power_bias = np.abs(Power_output - Power_label)
+                location_bias = np.sqrt(((output_x - gt_x)**2 + (output_y - gt_y)**2))
 
-            print(str(idx + 1) + "___label_x={}\t label_y={}\t Power_label={}".format(
-                                                        gt_x, gt_y, Power_label))
+                location_bias_list.append(location_bias)
+                Power_bias_list.append(Power_bias)
+            
 
-            print(str(idx + 1) + "___output_x={}\t output_y={}\t Power_output={}\t time={}".format(
-                                                        output_x, output_y, Power_output, now_time))
+                print(str(idx + 1) + "___source_num_" + str(i) +  "___label_x={}\t label_y={}\t Power_label={}".format(
+                                                            gt_x, gt_y, Power_label))
 
-            print(str(idx + 1) + "___location_bias={}\t Power_bias={}".format(
+                print(str(idx + 1) + "___source_num_" + str(i) + "___output_x={}\t output_y={}\t Power_output={}\t time={}".format(
+                                                            output_x, output_y, Power_output, now_time))
+
+                print(str(idx + 1) + "___source_num_" + str(i) +  "___location_bias={}\t Power_bias={}".format(
                                                         location_bias, Power_bias))
+
+                # 置零操作
+                gt_matrix = np_gt.reshape(41, 41, order='F')
+                out_matrix = np_output.reshape(41, 41, order='F')
+
+                gt_matrix = neighbor_2_zero(gt_matrix, gt_x_pos-1, gt_y_pos-1)
+                out_matrix = neighbor_2_zero(out_matrix, output_x_pos-1, output_y_pos-1)
+
+                np_gt = gt_matrix.reshape(gt_matrix.size, order='F')
+                np_output = out_matrix.reshape(out_matrix.size, order='F')
+
         
         print("mean_location_bias_in_val={}\t mean_Power_bias_in_val={}\t time_for_mean={}".format(np.mean(location_bias_list), np.mean(Power_bias_list), np.mean(time_list)))
 
@@ -227,23 +365,14 @@ def main():
 
     sys.stdout = Logger(args.save_folder + "log.txt")
 
-
-    # read the A.csv and wk_reshape.csv
-    A = pandas.read_csv('./data/A.csv', header=None)
-    temp_A = np.array(A)
-    A = torch.from_numpy(temp_A.astype(float))
-    wk_reshape = np.genfromtxt('./data/wk_reshape.csv', dtype=complex, delimiter=',') 
-    temp_w = np.array(wk_reshape)
-    wk_reshape = torch.from_numpy(temp_w.astype(complex))
-
-    wk_reshape = wk_reshape.cuda(non_blocking=True)
-    A = A.cuda(non_blocking=True)
+    con = Config(args.config).getConfig()['base']
+    _, _, _, _, args.frequencies = get_search_freq(con['N_total_samples'], con['scan_low_freq'], con['scan_high_freq'], con['fs'])
 
     # build data loader
-    train_dataloader, test_dataloader = set_loader(args)
+    train_dataloader, test_dataloader = set_loader(args, con)
 
     # build model and criterion
-    model = set_model(args, wk_reshape, A)
+    model = set_model(args)
 
     # build optimizer
     optimizer = set_optimizer(args, model)
@@ -270,7 +399,8 @@ def main():
 
         # evaluation
         if epoch % args.val_epochs == 0:
-            test(test_dataloader, model, args)
+            # test(test_dataloader, model, args, con)
+            test_more_source(test_dataloader, model, args, con)
 
     # save the last model
     save_file = os.path.join(args.save_folder, 'last.pt')

@@ -2,26 +2,17 @@ import argparse
 import os
 import sys
 sys.path.append('../../')
-from utils.utils import developCSM, Fast_DAS, pyContourf_two, steerVector2, get_microphone_info, get_search_freq, get_DAS_result
+from utils.utils import Fast_DAS, pyContourf_two, steerVector2, get_microphone_info, get_search_freq, get_DAS_result, wgn, data_preprocess
+from utils.config import Config
 import numpy as np
 import h5py
 import scipy.io as scio
 
 
 
-def array_signal_trans_DAS(args):
-    c = 343
-    # 采样频率
-    fs = 51200
-    # 麦克风和声源之间的距离
-    z_dist = 2.5
-    # 扫描频率范围
-    scan_freq = [2000]
-    # 扫描区域限定范围和扫描网格分辨率
-    scan_x = [-2, 2]
-    scan_y = [-2, 2]
-    scan_resolution = 0.1
 
+def array_signal_trans_DAS(args):
+    con = Config(args.config).getConfig()['base']
 
     mic_pos, mic_centre = get_microphone_info(args.micro_array_path)
 
@@ -34,18 +25,19 @@ def array_signal_trans_DAS(args):
             continue
         f = h5py.File(args.data_path + file, 'r')
         raw_sound_data = np.array(f['time_data'].value)
+        if args.add_noise:
+            raw_sound_data += wgn(raw_sound_data, args.dB_value)
         # f = scio.loadmat(args.data_path + file)
         # raw_sound_data = np.array(f['one_data'])
         # raw_sound_data = np.transpose(raw_sound_data, (1, 0))
         
-        N_total_samples = raw_sound_data.shape[0]
         N_mic = raw_sound_data.shape[1]
 
-        _, _, _, _, frequencies = get_search_freq(N_total_samples, scan_freq, fs)
-        CSM = developCSM(raw_sound_data, scan_freq, fs)
-        g, w = steerVector2(z_dist, frequencies, scan_x + scan_y, scan_resolution, mic_pos.T, c, mic_centre)
+        _, _, _, _, frequencies = get_search_freq(con['N_total_samples'], con['scan_low_freq'], con['scan_high_freq'], con['fs'])
+        CSM = data_preprocess(raw_sound_data, args.config)
+        g, w = steerVector2(con['z_dist'], frequencies, con['scan_x'] + con['scan_y'], con['scan_resolution'], mic_pos.T, con['c'], mic_centre)
         _, wk_reshape, _ = Fast_DAS(g, w, frequencies)
-        DAS_result = get_DAS_result(wk_reshape, CSM, frequencies, N_mic, scan_x + scan_y, scan_resolution)
+        DAS_result = get_DAS_result(wk_reshape, CSM, frequencies, N_mic, con['scan_x'] + con['scan_y'], con['scan_resolution'] )
 
         print("Saving the " + file.split('.')[0] + "_DAS result!")
         scio.savemat(args.save_DAS_results_path + file.split('.')[0] + '.mat', {'DAS_result':DAS_result})
@@ -83,10 +75,15 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--data_path', type=str, default='D:/Ftp_Server/zgx/data/Acoustic-NewData/data/')
     # parser.add_argument('--data_path', type=str, default='D:/Ftp_Server/zgx/data/Acoustic-NewData/generalization_one_data/')
-    parser.add_argument('--save_DAS_results_path', type=str, default='./DAS_results/')
+    parser.add_argument('--save_DAS_results_path', type=str, default='./DAS_results_-10dB/')
     # parser.add_argument('--save_DAS_results_path', type=str, default='./generalization_data_DAS_results/')
     parser.add_argument('--DAS_result_path', type=str, default='../../data/generalization/one_data_DAS_result.mat')
     parser.add_argument('--micro_array_path', type=str, default='D:/Ftp_Server/zgx/codes/Fast_DAS_2/MicArray/56_spiral_array.mat')
+
+    parser.add_argument('--config', default='../../utils/config.yml', type=str, help='config file path')
+    parser.add_argument('--add_noise', action='store_true', help='whether add gaussian noise to test')
+    parser.add_argument('--dB_value', default=0, type=float, help='gaussian noise value')
+  
     args = parser.parse_args()
 
     # check_DAS_result(args)
