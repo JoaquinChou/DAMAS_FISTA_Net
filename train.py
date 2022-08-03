@@ -11,7 +11,7 @@ from utils.utils import AverageMeter, save_model, Logger
 from networks.damas_fista_net import DAMAS_FISTANet
 import heapq
 from utils.config import Config
-from utils.utils import get_search_freq, neighbor_2_zero
+from utils.utils import get_search_freq, neighbor_2_zero, find_match_source
 
 def parse_option():
     parser = argparse.ArgumentParser(description='DAMAS_FISTANet for sound source in pytorch')
@@ -255,9 +255,43 @@ def test_more_source(test_dataloader, model, args, config):
     scanning_area_X = np.arange(config['scan_x'][0], config['scan_x'][1] + config['scan_resolution'], config['scan_resolution'])
     scanning_area_Y = np.arange(config['scan_y'][0], config['scan_y'][1] + config['scan_resolution'], config['scan_resolution'])
 
+    # 预热
+    cnt=1
     with torch.no_grad():
-        for idx, (CSM, wk_reshape, A, ATA, L, label, _) in enumerate(test_dataloader):
+        for idx, (CSM, wk_reshape, A, ATA, L, _, _) in enumerate(test_dataloader):
+            if cnt==100:
+                break
+            cnt+=1
+        
+            CSM = CSM.cuda(non_blocking=True)
+            wk_reshape = wk_reshape.cuda(non_blocking=True)
+            A = A.cuda(non_blocking=True)
+            ATA = ATA.cuda(non_blocking=True)
+            L = L.cuda(non_blocking=True)
+
+            output = None
+            # forward
+            for K in range(len(args.frequencies)):
+                CSM_K = CSM[:, :, :, K]
+                wk_reshape_K = wk_reshape[:, :, :, K]
+                A_K = A[:, :, :, K]
+                ATA_K = ATA[:, :, :, K]
+                L_K = L[:, K]
+                L_K = torch.unsqueeze(L_K, 1).to(torch.float64)
+                L_K = torch.unsqueeze(L_K, 2).to(torch.float64)
+                # forward
+                if output is None:
+                    output = model(CSM_K, wk_reshape_K, A_K, ATA_K, L_K)
+                else:
+                    output += model(CSM_K, wk_reshape_K, A_K, ATA_K, L_K)
+
+
+
+   
+    with torch.no_grad():
+        for idx, (CSM, wk_reshape, A, ATA, L, label, sample_name) in enumerate(test_dataloader):
     
+            sample_name = sample_name[0]
             CSM = CSM.cuda(non_blocking=True)
             wk_reshape = wk_reshape.cuda(non_blocking=True)
             A = A.cuda(non_blocking=True)
@@ -287,14 +321,16 @@ def test_more_source(test_dataloader, model, args, config):
             now_time = end_time - start_time
             time_list.append(now_time)
 
-
-
             np_gt = label.cpu().numpy()
             np_output = output.cpu().numpy()    
+
             np_gt = np.squeeze(np.squeeze(np_gt, 0), 1)
             np_output = np.squeeze(np.squeeze(np_output, 0), 1)
-
             print("source num is->", args.source_num)
+
+            # use the output_mat and gt_mat to calculate the location error
+            output_mat = np.zeros((args.source_num, 3))
+            gt_mat = np.zeros((args.source_num, 3))
 
             for i in range(args.source_num):
                 max_gt = max(np_gt)
@@ -317,25 +353,14 @@ def test_more_source(test_dataloader, model, args, config):
                 output_x = scanning_area_X[output_x_pos - 1]
                 output_y = scanning_area_Y[output_y_pos - 1]
 
+                output_mat[i][0] = output_x
+                output_mat[i][1] = output_y
+                output_mat[i][2] = max_output
 
-                Power_output = max_output
-                Power_label = max_gt
-                Power_bias = np.abs(Power_output - Power_label)
-                location_bias = np.sqrt(((output_x - gt_x)**2 + (output_y - gt_y)**2))
-
-                location_bias_list.append(location_bias)
-                Power_bias_list.append(Power_bias)
-            
-
-                print(str(idx + 1) + "___source_num_" + str(i) +  "___label_x={}\t label_y={}\t Power_label={}".format(
-                                                            gt_x, gt_y, Power_label))
-
-                print(str(idx + 1) + "___source_num_" + str(i) + "___output_x={}\t output_y={}\t Power_output={}\t time={}".format(
-                                                            output_x, output_y, Power_output, now_time))
-
-                print(str(idx + 1) + "___source_num_" + str(i) +  "___location_bias={}\t Power_bias={}".format(
-                                                        location_bias, Power_bias))
-
+                gt_mat[i][0] = gt_x
+                gt_mat[i][1] = gt_y
+                gt_mat[i][2] = max_gt
+    
                 # 置零操作
                 gt_matrix = np_gt.reshape(41, 41, order='F')
                 out_matrix = np_output.reshape(41, 41, order='F')
@@ -346,9 +371,25 @@ def test_more_source(test_dataloader, model, args, config):
                 np_gt = gt_matrix.reshape(gt_matrix.size, order='F')
                 np_output = out_matrix.reshape(out_matrix.size, order='F')
 
-        
-        print("mean_location_bias_in_val={}\t mean_Power_bias_in_val={}\t time_for_mean={}".format(np.mean(location_bias_list), np.mean(Power_bias_list), np.mean(time_list)))
 
+             
+            temp_gt_mat = gt_mat
+            for i in range(args.source_num):
+                gt_mat = temp_gt_mat
+                min_index, location_bias, Power_bias, temp_gt_mat = find_match_source(output_mat[i], temp_gt_mat)
+                location_bias_list.append(location_bias)
+                Power_bias_list.append(Power_bias)
+
+                print(sample_name + "__" + str(idx + 1) + "___source_num_" + str(i) +  "___label_x={}\t label_y={}\t Power_label={}".format(
+                                                            gt_mat[min_index][0], gt_mat[min_index][1], gt_mat[min_index][2]))
+
+                print(sample_name + "__" + str(idx + 1) + "___source_num_" + str(i) + "___output_x={}\t output_y={}\t Power_output={}\t time={}".format(
+                                                            output_mat[i][0], output_mat[i][1], output_mat[i][2], now_time))
+
+                print(sample_name + "__" + str(idx + 1) + "___source_num_" + str(i) +  "___location_bias={}\t Power_bias={}".format(
+                                                        location_bias, Power_bias))
+
+        print("mean_location_bias_in_val={}\t mean_Power_bias_in_val={}\t time_for_mean={}".format(np.mean(location_bias_list), np.mean(Power_bias_list), np.mean(time_list)))
 
 
 
