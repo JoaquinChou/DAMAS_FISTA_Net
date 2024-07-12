@@ -10,7 +10,7 @@ If you use our code, please cite
 @article{liang2023learning,
   title={Learning an Interpretable End-to-End Network for Real-Time Acoustic Beamforming},
   author={Liang, Hao and Zhou, Guanxing and Tu, Xiaotong and Jakobsson, Andreas and Ding, Xinghao and Huang, Yue},
-  journal={The Journal of Sound and Vibration},
+  journal={Journal of Sound and Vibration},
   year={2024}
 }
 ```
